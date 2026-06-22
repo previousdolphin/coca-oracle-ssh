@@ -1,0 +1,4 @@
+.ssh/
+*.log
+server.log
+/coca-oracle-ssh

@@ -1,0 +1,38 @@
+# Fly.io config for the CoCA skill terminal (SSH app).
+# Maps external port 22 -> the app's internal SSH listener. SSH does its own
+# crypto, so the handler list is empty (no TLS termination).
+app = "coca-oracle-ssh"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "23234"
+  HOST = "0.0.0.0"
+  ORACLE_MODEL = "claude-haiku-4-5"
+  SKILLS_RAW_BASE = "https://raw.githubusercontent.com/previousdolphin/coca-skills/main"
+
+# Raw TCP: SSH on port 22 -> internal 23234. No TLS handler.
+[[services]]
+  protocol = "tcp"
+  internal_port = 23234
+
+  [[services.ports]]
+    port = 22
+    handlers = []
+
+  [services.concurrency]
+    type = "connections"
+    hard_limit = 200
+    soft_limit = 150
+
+# Always-on: do not auto-stop, SSH is a long-lived listener.
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
+
+[machine]
+  auto_stop_machines = false
+  auto_start_machines = false
+  min_machines_running = 1

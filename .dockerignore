@@ -1,0 +1,8 @@
+.git
+.ssh
+*.log
+server.log
+/tmp
+README.md
+fly.toml
+*_test.go
