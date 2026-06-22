@@ -2,3 +2,5 @@
 *.log
 server.log
 /coca-oracle-ssh
+bible.full.txt
+bible.placeholder.bak
