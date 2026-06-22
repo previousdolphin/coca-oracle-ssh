@@ -170,7 +170,7 @@ func newModel(r *lipgloss.Renderer, store *Skills, oracle *Oracle, rl *Limiter, 
 	l.SetFilteringEnabled(true)
 	l.Styles.NoItems = st.muted
 
-	return model{
+	m := model{
 		st:     st,
 		store:  store,
 		oracle: oracle,
@@ -183,6 +183,11 @@ func newModel(r *lipgloss.Renderer, store *Skills, oracle *Oracle, rl *Limiter, 
 		vp:     vp,
 		sp:     sp,
 	}
+	// Size with a sane default so the UI renders even if the client never sends
+	// a real window size (some terminals/proxies report 0×0 initially). A real
+	// tea.WindowSizeMsg overrides this on connect.
+	m.resize(80, 24)
+	return m
 }
 
 func (m model) Init() tea.Cmd {
@@ -457,6 +462,9 @@ func (m *model) startVoicePick() {
 // ---- helpers ----
 
 func (m *model) resize(w, h int) {
+	if w <= 0 || h <= 0 {
+		return // ignore 0×0 reports; keep the current/default size so we still render
+	}
 	m.width, m.height = w, h
 
 	lw := 40

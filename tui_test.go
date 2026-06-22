@@ -182,6 +182,19 @@ func TestChatRenderAndGuards(t *testing.T) {
 	}
 }
 
+func TestRendersWithoutWindowSize(t *testing.T) {
+	r := lipgloss.NewRenderer(io.Discard)
+	m := newModel(r, testStore(), NewOracle("", ""), NewLimiter(99, time.Minute, 999), "ip")
+	if m.View() == "" {
+		t.Fatal("blank before any WindowSizeMsg (should render with the default size)")
+	}
+	// A 0×0 report (sent by some SSH clients) must not blank the UI.
+	m = step(m, tea.WindowSizeMsg{Width: 0, Height: 0})
+	if !strings.Contains(m.View(), "establishing link") {
+		t.Fatalf("0×0 WindowSizeMsg blanked the banner:\n%q", m.View())
+	}
+}
+
 func TestRateLimit(t *testing.T) {
 	l := NewLimiter(2, time.Minute, 100)
 	if ok, _ := l.Allow("ip"); !ok {
