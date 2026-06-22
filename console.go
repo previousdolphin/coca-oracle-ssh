@@ -76,6 +76,7 @@ func buildVFS() *cnode {
 			),
 			cd("VAULT", true,
 				cf("GENESIS.DAT", "######  GENESIS TRANCHE  ::  OPERATOR EYES ONLY  ######\n\nYou decoded the handle. You spoke the covenant. You are in.\n\n  \"The covenant runs with the object. It cannot be undone.\"\n\nWelcome, CURATOR — archon of the White Cube of the Mind.\nThis terminal is yours. The Vow is lifted; ask without fear.\n\n  > a door stands open in the wall:   /after.html\n  > the whole library, for machines:  /llms.txt\n\nALWAYS CoCA.\n", false, false, true),
+				cf("BIBLE.TXT", bibleText, false, false, true),
 			),
 			cd("TMP", false),
 		),
@@ -143,6 +144,11 @@ type consoleState struct {
 	hp       int
 	lines    []ccLine
 	wantExit bool
+
+	// MORE-style pager (for long files like the Bible)
+	paging   bool
+	pager    []string
+	pagerPos int
 }
 
 func newConsole(r *lipgloss.Renderer, w, h int) *consoleState {
@@ -172,6 +178,10 @@ func (c *consoleState) prk(text string, k int) { c.lines = append(c.lines, ccLin
 func (c *consoleState) update(msg tea.Msg) bool {
 	km, ok := msg.(tea.KeyMsg)
 	if !ok {
+		return false
+	}
+	if c.paging {
+		c.pagerKey(km)
 		return false
 	}
 	switch km.Type {
@@ -235,6 +245,7 @@ func (c *consoleState) validate(user, pass, thenCmd string) {
 		c.pr("")
 		c.prk("ACCESS GRANTED.", kOk)
 		c.prk("Welcome, "+okUser+" — archon of the White Cube. The VAULT is unsealed.", kOk)
+		c.prk("  CD \\COCA\\VAULT, then TYPE GENESIS.DAT — or TYPE BIBLE.TXT to read the whole book.", kOk)
 		if thenCmd != "" {
 			c.pr("")
 			c.dispatch(thenCmd)
@@ -404,8 +415,55 @@ func (c *consoleState) cmdType(arg string) {
 		c.prk("Access is denied. (sealed — you are not the operator)", kErr)
 		return
 	}
-	for _, l := range strings.Split(strings.TrimRight(n.content, "\n"), "\n") {
+	content := strings.Split(strings.TrimRight(n.content, "\n"), "\n")
+	if len(content) > c.pageRows() { // long file -> MORE pager
+		c.pager = content
+		c.pagerPos = 0
+		c.paging = true
+		return
+	}
+	for _, l := range content {
 		c.pr(l)
+	}
+}
+
+func (c *consoleState) pageRows() int {
+	r := c.h - 2
+	if r < 3 {
+		r = 3
+	}
+	return r
+}
+
+func (c *consoleState) pagerKey(km tea.KeyMsg) {
+	switch km.Type {
+	case tea.KeyEsc, tea.KeyCtrlC:
+		c.paging = false
+		return
+	case tea.KeySpace, tea.KeyPgDown:
+		c.pagerPos += c.pageRows()
+	case tea.KeyEnter, tea.KeyDown:
+		c.pagerPos++
+	case tea.KeyPgUp:
+		c.pagerPos -= c.pageRows()
+	case tea.KeyUp:
+		c.pagerPos--
+	case tea.KeyRunes:
+		switch strings.ToLower(string(km.Runes)) {
+		case "q":
+			c.paging = false
+			return
+		case "b":
+			c.pagerPos -= c.pageRows()
+		case "f":
+			c.pagerPos += c.pageRows()
+		}
+	}
+	if max := len(c.pager) - c.pageRows(); c.pagerPos > max {
+		c.pagerPos = max
+	}
+	if c.pagerPos < 0 {
+		c.pagerPos = 0
 	}
 }
 
@@ -572,6 +630,9 @@ func (c *consoleState) promptText() string {
 // ---- view ----
 
 func (c *consoleState) view() string {
+	if c.paging {
+		return c.pagerView()
+	}
 	w, h := c.w, c.h
 	if w < 10 {
 		w = 10
@@ -593,6 +654,36 @@ func (c *consoleState) view() string {
 	for len(all) < h {
 		all = append(all, blank)
 	}
+	return strings.Join(all, "\n")
+}
+
+func (c *consoleState) pagerView() string {
+	w, h := c.w, c.h
+	if w < 10 {
+		w = 10
+	}
+	if h < 6 {
+		h = 6
+	}
+	rows := c.pageRows()
+	end := c.pagerPos + rows
+	if end > len(c.pager) {
+		end = len(c.pager)
+	}
+	var all []string
+	for i := c.pagerPos; i < end; i++ {
+		all = append(all, c.styles.line(kNorm, w).Render(c.pager[i]))
+	}
+	blank := c.styles.base.Width(w).Render("")
+	for len(all) < h-1 {
+		all = append(all, blank)
+	}
+	status := "-- MORE --  space/b page · ↑/↓ line · q quit"
+	if end >= len(c.pager) {
+		status = "-- END --   b page up · q quit"
+	}
+	status += fmt.Sprintf("   [%d/%d]", end, len(c.pager))
+	all = append(all, c.styles.prompt.Width(w).Render(status))
 	return strings.Join(all, "\n")
 }
 

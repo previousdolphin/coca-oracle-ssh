@@ -95,6 +95,14 @@ func TestConsolePuzzle(t *testing.T) {
 		t.Fatalf("genesis not readable:\n%s", conText(c))
 	}
 
+	// BIBLE.TXT is unlocked in the vault (prints, or opens the MORE pager if long).
+	c.lines = nil
+	c.paging = false
+	c.submit("type BIBLE.TXT")
+	if !c.paging && !strings.Contains(conText(c), "Concept") {
+		t.Fatalf("BIBLE.TXT not readable after login:\n%s", conText(c))
+	}
+
 	c.submit("exit")
 	if !c.wantExit {
 		t.Fatal("EXIT should set wantExit")
