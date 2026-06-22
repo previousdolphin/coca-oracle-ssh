@@ -19,28 +19,30 @@ type screen int
 
 const (
 	screenBanner screen = iota
-	screenModes
-	screenCats
-	screenSkills
+	screenEngine
+	screenPick
 	screenChat
 )
-
-type modeOption struct {
-	key   Mode
-	label string
-	blurb string
-}
-
-var modeList = []modeOption{
-	{ModeDoctrine, "ORACLE · doctrine", "the Church's own explanatory voice"},
-	{ModeVoice, "ORACLE · after-voice", "the Oracle through an after— thinker"},
-	{ModeGeneric, "OPEN CHANNEL · skill", "a generic model wearing one skill"},
-}
 
 const (
 	maxInput = 2000
 	maxTurns = 24 // 12 exchanges
+
+	noSkillLabel  = "— no skill —"
+	noVoiceLabel  = "— no voice —"
+	rawVoiceLabel = "— raw · the Church's voice —"
 )
+
+type engineOption struct {
+	key   Engine
+	label string
+	blurb string
+}
+
+var engineList = []engineOption{
+	{EngineOracle, "THE ORACLE", "the Church's voice — raw, or in a thinker's voice"},
+	{EngineOpen, "OPEN CHANNEL", "a generic model wearing a skill, a voice, or both"},
+}
 
 // ---- styles (built per-session from the SSH renderer) ----
 
@@ -71,7 +73,11 @@ func newStyles(r *lipgloss.Renderer) styles {
 
 // ---- list item ----
 
-type skillItem struct{ name, desc string }
+type skillItem struct {
+	name string
+	desc string
+	none bool // the synthetic "— no skill/voice —" / "raw" row
+}
 
 func (i skillItem) Title() string       { return i.name }
 func (i skillItem) Description() string { return i.desc }
@@ -80,8 +86,7 @@ func (i skillItem) FilterValue() string { return i.name + " " + i.desc }
 // ---- messages ----
 
 type bannerDoneMsg struct{}
-type skillLoadedMsg struct {
-	name   string
+type sysLoadedMsg struct {
 	system string
 	err    error
 }
@@ -103,19 +108,21 @@ type model struct {
 	width  int
 	height int
 
-	mode    Mode
-	modeIdx int
+	engineIdx int
+	engine    Engine
+	skill     string // open's functional skill ("" = none)
+	voice     string // after-* voice ("" = none / raw)
+	picking   string // "skill" | "voice"
 
-	cats   []string
-	catIdx int
+	installing  bool
+	installName string
 
-	list      list.Model
-	activeCat string
-	descW     int
+	list  list.Model
+	descW int
 
-	skillName string
-	system    string
-	loading   bool
+	system       string
+	loading      bool
+	loadingLabel string
 
 	vp       viewport.Model
 	ta       textarea.Model
@@ -170,8 +177,7 @@ func newModel(r *lipgloss.Renderer, store *Skills, oracle *Oracle, rl *Limiter, 
 		rl:     rl,
 		ip:     ip,
 		screen: screenBanner,
-		mode:   ModeDoctrine,
-		cats:   store.Categories(),
+		engine: EngineOracle,
 		list:   l,
 		ta:     ta,
 		vp:     vp,
@@ -185,16 +191,12 @@ func (m model) Init() tea.Cmd {
 
 // ---- commands ----
 
-func loadSystemCmd(store *Skills, mode Mode, skill string) tea.Cmd {
+func loadSystemCmd(store *Skills, engine Engine, skill, voice string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
-		sys, err := store.SystemFor(ctx, mode, skill)
-		name := skill
-		if mode == ModeDoctrine {
-			name = "doctrine"
-		}
-		return skillLoadedMsg{name: name, system: sys, err: err}
+		sys, err := store.SystemFor(ctx, engine, skill, voice)
+		return sysLoadedMsg{system: sys, err: err}
 	}
 }
 
@@ -218,7 +220,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case bannerDoneMsg:
 		if m.screen == screenBanner {
-			m.screen = screenModes
+			m.screen = screenEngine
 		}
 		return m, nil
 
@@ -233,14 +235,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case skillLoadedMsg:
+	case sysLoadedMsg:
 		m.loading = false
 		if msg.err != nil {
 			m.flash = "load failed: " + short(msg.err)
-			m.screen = screenSkills
+			m.screen = screenPick
 			return m, nil
 		}
-		m.skillName = msg.name
 		m.system = msg.system
 		m.msgs = nil
 		m.flash = ""
@@ -253,7 +254,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch {
 		case msg.err != nil && errors.Is(msg.err, ErrRefused):
 			refusal := "[ request refused ]"
-			if m.mode != ModeGeneric {
+			if m.engine == EngineOracle {
 				refusal = "That request lies outside the Covenant."
 			}
 			m.msgs = append(m.msgs, Msg{Role: "assistant", Content: refusal})
@@ -270,22 +271,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m.screen {
 	case screenBanner:
 		if _, ok := msg.(tea.KeyMsg); ok {
-			m.screen = screenModes
+			m.screen = screenEngine
 		}
 		return m, nil
-	case screenModes:
-		return m.updateModes(msg)
-	case screenCats:
-		return m.updateCats(msg)
-	case screenSkills:
-		return m.updateSkills(msg)
+	case screenEngine:
+		return m.updateEngine(msg)
+	case screenPick:
+		return m.updatePick(msg)
 	case screenChat:
 		return m.updateChat(msg)
 	}
 	return m, nil
 }
 
-func (m model) updateModes(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m model) updateEngine(msg tea.Msg) (tea.Model, tea.Cmd) {
 	km, ok := msg.(tea.KeyMsg)
 	if !ok {
 		return m, nil
@@ -294,63 +293,34 @@ func (m model) updateModes(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case "ctrl+c", "q":
 		return m, tea.Quit
 	case "up", "k":
-		if m.modeIdx > 0 {
-			m.modeIdx--
+		if m.engineIdx > 0 {
+			m.engineIdx--
 		}
 	case "down", "j":
-		if m.modeIdx < len(modeList)-1 {
-			m.modeIdx++
+		if m.engineIdx < len(engineList)-1 {
+			m.engineIdx++
 		}
 	case "enter", "l", "right":
-		m.mode = modeList[m.modeIdx].key
-		m.flash = ""
-		switch m.mode {
-		case ModeDoctrine:
-			// No skill — load the doctrine prompt and go straight to chat.
-			m.loading = true
-			m.skillName = "doctrine"
-			m.screen = screenChat
-			return m, tea.Batch(m.sp.Tick, loadSystemCmd(m.store, m.mode, ""))
-		case ModeVoice:
-			// Voices are the After— grouping.
-			m.loadCategory("After —")
-			m.screen = screenSkills
-		case ModeGeneric:
-			m.screen = screenCats
+		m.engine = engineList[m.engineIdx].key
+		m.skill, m.voice, m.flash = "", "", ""
+		if m.engine == EngineOracle {
+			m.startVoicePick() // first item is "raw"
+		} else {
+			m.startSkillPick()
 		}
+		m.screen = screenPick
 	}
 	return m, nil
 }
 
-func (m model) updateCats(msg tea.Msg) (tea.Model, tea.Cmd) {
-	km, ok := msg.(tea.KeyMsg)
-	if !ok {
+func (m model) updatePick(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Install overlay: any key dismisses.
+	if m.installing {
+		if _, ok := msg.(tea.KeyMsg); ok {
+			m.installing = false
+		}
 		return m, nil
 	}
-	switch km.String() {
-	case "ctrl+c", "q":
-		return m, tea.Quit
-	case "esc", "h", "left":
-		m.screen = screenModes
-		return m, nil
-	case "up", "k":
-		if m.catIdx > 0 {
-			m.catIdx--
-		}
-	case "down", "j":
-		if m.catIdx < len(m.cats)-1 {
-			m.catIdx++
-		}
-	case "enter", "l", "right":
-		if len(m.cats) > 0 {
-			m.loadCategory(m.cats[m.catIdx])
-			m.screen = screenSkills
-		}
-	}
-	return m, nil
-}
-
-func (m model) updateSkills(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if km, ok := msg.(tea.KeyMsg); ok {
 		filtering := m.list.FilterState() == list.Filtering
 		if !filtering {
@@ -358,22 +328,41 @@ func (m model) updateSkills(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "ctrl+c", "q":
 				return m, tea.Quit
 			case "esc", "h", "left":
-				// Voice skipped the category menu; go back to mode select.
-				if m.mode == ModeVoice {
-					m.screen = screenModes
+				if m.picking == "voice" && m.engine == EngineOpen {
+					m.startSkillPick() // step back to the skill choice
 				} else {
-					m.screen = screenCats
+					m.screen = screenEngine
 				}
 				m.flash = ""
 				return m, nil
-			case "enter":
-				if it, ok := m.list.SelectedItem().(skillItem); ok {
-					m.loading = true
-					m.skillName = it.name
-					m.screen = screenChat
-					m.flash = ""
-					return m, tea.Batch(m.sp.Tick, loadSystemCmd(m.store, m.mode, it.name))
+			case "d":
+				if it, ok := m.list.SelectedItem().(skillItem); ok && !it.none {
+					m.installing = true
+					m.installName = it.name
 				}
+				return m, nil
+			case "enter":
+				it, ok := m.list.SelectedItem().(skillItem)
+				if !ok {
+					break
+				}
+				val := ""
+				if !it.none {
+					val = it.name
+				}
+				if m.picking == "skill" {
+					m.skill = val
+					m.startVoicePick()
+					return m, nil
+				}
+				// picking == "voice"
+				m.voice = val
+				if m.engine == EngineOpen && m.skill == "" && m.voice == "" {
+					m.flash = "pick a skill or a voice to open the channel"
+					m.startSkillPick()
+					return m, nil
+				}
+				return m.connect()
 			}
 		}
 	}
@@ -388,17 +377,13 @@ func (m model) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c":
 			return m, tea.Quit
 		case "esc":
-			// back out — reset the conversation. Doctrine has no skill list, so
-			// it returns to the mode picker; voice/generic return to the skills.
-			if m.mode == ModeDoctrine {
-				m.screen = screenModes
-			} else {
-				m.screen = screenSkills
-			}
+			// back out — reset the conversation, return to the voice step.
 			m.msgs = nil
 			m.system = ""
 			m.ta.Reset()
 			m.ta.Blur()
+			m.startVoicePick()
+			m.screen = screenPick
 			return m, nil
 		case "enter":
 			if m.loading || m.thinking {
@@ -433,6 +418,42 @@ func (m model) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
+func (m model) connect() (tea.Model, tea.Cmd) {
+	m.loading = true
+	m.flash = ""
+	m.loadingLabel = m.personaShort()
+	m.screen = screenChat
+	return m, tea.Batch(m.sp.Tick, loadSystemCmd(m.store, m.engine, m.skill, m.voice))
+}
+
+// ---- list population ----
+
+func (m *model) startSkillPick() {
+	items := []list.Item{skillItem{name: noSkillLabel, none: true}}
+	for _, s := range m.store.NonAfter() {
+		items = append(items, skillItem{name: s.Name, desc: s.Description})
+	}
+	m.list.SetItems(items)
+	m.list.ResetFilter()
+	m.list.Select(0)
+	m.picking = "skill"
+}
+
+func (m *model) startVoicePick() {
+	label := noVoiceLabel
+	if m.engine == EngineOracle {
+		label = rawVoiceLabel
+	}
+	items := []list.Item{skillItem{name: label, none: true}}
+	for _, s := range m.store.After() {
+		items = append(items, skillItem{name: s.Name, desc: s.Description})
+	}
+	m.list.SetItems(items)
+	m.list.ResetFilter()
+	m.list.Select(0)
+	m.picking = "voice"
+}
+
 // ---- helpers ----
 
 func (m *model) resize(w, h int) {
@@ -445,7 +466,7 @@ func (m *model) resize(w, h int) {
 	if lw < 18 {
 		lw = 18
 	}
-	listH := h - 8
+	listH := h - 9
 	if listH < 3 {
 		listH = 3
 	}
@@ -467,18 +488,6 @@ func (m *model) resize(w, h int) {
 	m.vp.Height = vpH
 	m.ta.SetWidth(vpW)
 	m.renderTranscript()
-}
-
-func (m *model) loadCategory(cat string) {
-	skills := m.store.InCategory(cat)
-	items := make([]list.Item, len(skills))
-	for i, s := range skills {
-		items[i] = skillItem{name: s.Name, desc: s.Description}
-	}
-	m.list.SetItems(items)
-	m.list.ResetFilter()
-	m.list.Select(0)
-	m.activeCat = cat
 }
 
 func (m *model) trimHistory() {
@@ -519,28 +528,57 @@ func (m *model) renderTranscript() {
 	m.vp.GotoBottom()
 }
 
-// speaker is the label shown before an assistant turn.
-func (m model) speaker() string {
-	switch m.mode {
-	case ModeGeneric:
-		return m.skillName
-	case ModeVoice:
-		return "oracle·" + m.skillName
-	default:
+// personaShort is a compact tag for the active persona.
+func (m model) personaShort() string {
+	if m.engine == EngineOracle {
+		if m.voice != "" {
+			return "oracle·" + m.voice
+		}
 		return "oracle"
 	}
+	var bits []string
+	if m.skill != "" {
+		bits = append(bits, m.skill)
+	}
+	if m.voice != "" {
+		bits = append(bits, m.voice)
+	}
+	if len(bits) == 0 {
+		return "open"
+	}
+	return strings.Join(bits, "+")
 }
 
-// statusLabel is the active-persona line shown above the chat.
+// speaker is the label before an assistant turn.
+func (m model) speaker() string {
+	if m.engine == EngineOracle {
+		return "oracle"
+	}
+	if m.skill != "" {
+		return m.skill
+	}
+	if m.voice != "" {
+		return m.voice
+	}
+	return "open"
+}
+
+// statusLabel is the active-persona line above the chat.
 func (m model) statusLabel() string {
-	switch m.mode {
-	case ModeVoice:
-		return "oracle · after-voice: " + m.skillName
-	case ModeGeneric:
-		return "open channel · " + m.skillName
-	default:
+	if m.engine == EngineOracle {
+		if m.voice != "" {
+			return "oracle · voice: " + m.voice
+		}
 		return "oracle · doctrine"
 	}
+	var parts []string
+	if m.skill != "" {
+		parts = append(parts, m.skill)
+	}
+	if m.voice != "" {
+		parts = append(parts, "voice: "+m.voice)
+	}
+	return "open · " + strings.Join(parts, " + ")
 }
 
 func short(err error) string {
@@ -560,12 +598,10 @@ func (m model) View() string {
 	switch m.screen {
 	case screenBanner:
 		return m.bannerView()
-	case screenModes:
-		return m.modesView()
-	case screenCats:
-		return m.catsView()
-	case screenSkills:
-		return m.skillsView()
+	case screenEngine:
+		return m.engineView()
+	case screenPick:
+		return m.pickView()
 	case screenChat:
 		return m.chatView()
 	}
@@ -598,13 +634,13 @@ func (m model) bar() string {
 		m.st.muted.Render(fmt.Sprintf("· %d modules", m.store.Count()))
 }
 
-func (m model) modesView() string {
+func (m model) engineView() string {
 	var b strings.Builder
 	b.WriteString("\n " + m.bar() + "\n\n")
 	b.WriteString(m.st.muted.Render("  choose a channel") + "\n\n")
-	for i, opt := range modeList {
-		line := fmt.Sprintf("%-22s %s", opt.label, m.st.muted.Render(opt.blurb))
-		if i == m.modeIdx {
+	for i, opt := range engineList {
+		line := fmt.Sprintf("%-14s %s", opt.label, m.st.muted.Render(opt.blurb))
+		if i == m.engineIdx {
 			b.WriteString("  " + m.st.accent.Bold(true).Render("▸ "+line) + "\n")
 		} else {
 			b.WriteString("  " + m.st.dim.Render("  "+line) + "\n")
@@ -618,48 +654,67 @@ func (m model) modesView() string {
 	return b.String()
 }
 
-func (m model) catsView() string {
-	var b strings.Builder
-	b.WriteString("\n " + m.bar() + "\n\n")
-	b.WriteString(m.st.muted.Render("  select a category") + "\n\n")
-	for i, c := range m.cats {
-		n := len(m.store.InCategory(c))
-		line := fmt.Sprintf("%s  %s",
-			strings.ToUpper(c),
-			m.st.muted.Render(fmt.Sprintf("(%d)", n)))
-		if i == m.catIdx {
-			b.WriteString("  " + m.st.accent.Bold(true).Render("▸ "+line) + "\n")
-		} else {
-			b.WriteString("  " + m.st.dim.Render("  "+line) + "\n")
-		}
+func (m model) pickContext() string {
+	if m.engine == EngineOracle {
+		return "the oracle"
 	}
-	b.WriteString("\n")
-	if m.flash != "" {
-		b.WriteString("  " + m.st.err.Render(m.flash) + "\n\n")
+	if m.picking == "voice" && m.skill != "" {
+		return "open · " + m.skill + " + …"
 	}
-	b.WriteString(m.hint("↑/↓ move   ⏎ open   q disconnect"))
-	return b.String()
+	return "open channel"
 }
 
-func (m model) skillsView() string {
+func (m model) pickView() string {
+	if m.installing {
+		return m.installView()
+	}
 	var b strings.Builder
 	b.WriteString("\n " + m.bar() + "\n\n")
-	b.WriteString("  " + m.st.bright.Bold(true).Render(strings.ToUpper(m.activeCat)) + "\n")
+	head := "CHOOSE A VOICE"
+	if m.picking == "skill" {
+		head = "CHOOSE A SKILL"
+	}
+	b.WriteString("  " + m.st.bright.Bold(true).Render(head) +
+		"   " + m.st.muted.Render(m.pickContext()) + "\n")
 
 	left := m.list.View()
-
 	var desc string
 	if it, ok := m.list.SelectedItem().(skillItem); ok {
-		desc = m.st.accent.Render(it.name) + "\n\n" + m.st.dim.Width(m.descW).Render(it.desc)
+		if it.none {
+			desc = m.st.muted.Render(it.name)
+		} else {
+			desc = m.st.accent.Render(it.name) + "\n\n" + m.st.dim.Width(m.descW).Render(it.desc)
+		}
 	} else {
 		desc = m.st.muted.Render("no match")
 	}
 	right := lipgloss.NewStyle().Width(m.descW).Render(desc)
-
-	cols := lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", right)
-	b.WriteString(cols)
+	b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", right))
 	b.WriteString("\n")
-	b.WriteString(m.hint("↑/↓ move   / filter   ⏎ load module   esc back   q disconnect"))
+	if m.flash != "" {
+		b.WriteString("  " + m.st.err.Render(m.flash) + "\n")
+	}
+	b.WriteString(m.hint("↑/↓ move   / filter   d download   ⏎ select   esc back   q disconnect"))
+	return b.String()
+}
+
+func (m model) installView() string {
+	raw := m.store.RawURL(m.installName)
+	repo := m.store.RepoURL()
+	var b strings.Builder
+	b.WriteString("\n " + m.bar() + "\n\n")
+	b.WriteString("  " + m.st.bright.Bold(true).Render("INSTALL · "+m.installName) + "\n\n")
+
+	section := func(label, cmd string) {
+		b.WriteString("  " + m.st.muted.Render(label) + "\n")
+		b.WriteString("    " + m.st.bright.Render(cmd) + "\n\n")
+	}
+	section("fetch just this skill →", "curl -fsSL "+raw+" -o SKILL.md")
+	section("install into Claude Code →",
+		"mkdir -p ~/.claude/skills/"+m.installName+" && curl -fsSL "+raw+" \\\n      -o ~/.claude/skills/"+m.installName+"/SKILL.md")
+	section("the whole library →", "git clone "+repo+"\n    cp -r coca-skills/"+m.installName+" ~/.claude/skills/")
+
+	b.WriteString(m.hint("press any key to return"))
 	return b.String()
 }
 
@@ -669,7 +724,7 @@ func (m model) chatView() string {
 
 	if m.loading || m.system == "" {
 		b.WriteString("\n  " + m.st.accent.Render(m.sp.View()) +
-			m.st.dim.Render(" establishing module "+m.st.bright.Render(m.skillName)+" …") + "\n")
+			m.st.dim.Render(" opening channel "+m.st.bright.Render(m.loadingLabel)+" …") + "\n")
 		return b.String()
 	}
 
@@ -680,7 +735,7 @@ func (m model) chatView() string {
 	if m.flash != "" {
 		b.WriteString("  " + m.st.err.Render(m.flash) + "\n")
 	}
-	b.WriteString(m.hint("⏎ send   esc swap module   ctrl+c disconnect"))
+	b.WriteString(m.hint("⏎ send   esc back   ctrl+c disconnect"))
 	return b.String()
 }
 

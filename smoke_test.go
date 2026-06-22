@@ -39,7 +39,7 @@ func TestSmokeSkillDrivesModel(t *testing.T) {
 		{"after-nietzsche", "Is honesty always good?"},
 	}
 	for _, c := range cases {
-		sys, err := store.SystemFor(ctx, ModeGeneric, c.skill)
+		sys, err := store.SystemFor(ctx, EngineOpen, c.skill, "")
 		if err != nil {
 			t.Fatalf("system prompt %s: %v", c.skill, err)
 		}

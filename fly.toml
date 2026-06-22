@@ -14,9 +14,12 @@ primary_region = "iad"
   SKILLS_RAW_BASE = "https://raw.githubusercontent.com/previousdolphin/coca-skills/main"
 
 # Raw TCP: SSH on port 22 -> internal 23234. No TLS handler.
+# Always-on: never auto-stop, SSH is a long-lived listener.
 [[services]]
   protocol = "tcp"
   internal_port = 23234
+  auto_stop_machines = false
+  auto_start_machines = false
 
   [[services.ports]]
     port = 22
@@ -27,12 +30,6 @@ primary_region = "iad"
     hard_limit = 200
     soft_limit = 150
 
-# Always-on: do not auto-stop, SSH is a long-lived listener.
 [[vm]]
   size = "shared-cpu-1x"
   memory = "256mb"
-
-[machine]
-  auto_stop_machines = false
-  auto_start_machines = false
-  min_machines_running = 1

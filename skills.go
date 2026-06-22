@@ -172,36 +172,77 @@ func (s *Skills) body(ctx context.Context, name string) (string, error) {
 	return text, nil
 }
 
-// Mode selects which persona the chat runs as.
-type Mode string
+// Engine selects the base persona.
+type Engine string
 
 const (
-	ModeDoctrine Mode = "doctrine" // the CoCA Oracle (no skill)
-	ModeVoice    Mode = "voice"    // the Oracle through an after-* thinker
-	ModeGeneric  Mode = "generic"  // a plain model wearing one skill
+	EngineOracle Engine = "oracle" // the CoCA Oracle (doctrine)
+	EngineOpen   Engine = "open"   // a plain model, no persona
 )
 
-// SystemFor builds the system prompt for a mode (+ skill where required).
-// Mirrors the website Oracle: doctrine = the doctrine prompt; voice = doctrine +
-// an after-* voice filter; generic = a skill only, no persona.
-func (s *Skills) SystemFor(ctx context.Context, mode Mode, skill string) (string, error) {
-	switch mode {
-	case ModeDoctrine:
-		return doctrinePrompt, nil
-	case ModeVoice:
-		b, err := s.body(ctx, skill)
-		if err != nil {
-			return "", err
+// SystemFor composes the system prompt from the engine + optional skill/voice,
+// mirroring the website Oracle:
+//   - oracle: doctrine (+ a VOICE_WRAP after-voice if set)
+//   - open:   GENERIC_GLUE+skill and/or GENERIC_VOICE_WRAP+voice (at least one)
+func (s *Skills) SystemFor(ctx context.Context, engine Engine, skill, voice string) (string, error) {
+	switch engine {
+	case EngineOracle:
+		out := doctrinePrompt
+		if voice != "" {
+			v, err := s.body(ctx, voice)
+			if err != nil {
+				return "", err
+			}
+			out += "\n\n" + voiceWrap + v
 		}
-		return doctrinePrompt + "\n\n" + voiceWrap + b, nil
-	case ModeGeneric:
-		b, err := s.body(ctx, skill)
-		if err != nil {
-			return "", err
+		return out, nil
+	case EngineOpen:
+		var parts []string
+		if skill != "" {
+			b, err := s.body(ctx, skill)
+			if err != nil {
+				return "", err
+			}
+			parts = append(parts, genericGlue+b)
 		}
-		return genericGlue + b, nil
+		if voice != "" {
+			b, err := s.body(ctx, voice)
+			if err != nil {
+				return "", err
+			}
+			parts = append(parts, genericVoiceWrap+b)
+		}
+		if len(parts) == 0 {
+			return "", fmt.Errorf("open channel needs a skill or a voice")
+		}
+		return strings.Join(parts, "\n\n"), nil
 	}
-	return "", fmt.Errorf("unknown mode %q", mode)
+	return "", fmt.Errorf("unknown engine %q", engine)
+}
+
+// After returns the after-* voices; NonAfter returns the functional skills.
+func (s *Skills) After() []Skill { return s.InCategory("After —") }
+func (s *Skills) NonAfter() []Skill {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []Skill
+	for _, sk := range s.index {
+		if sk.Category != "After —" {
+			out = append(out, sk)
+		}
+	}
+	return out
+}
+
+// RawURL is where a skill's SKILL.md lives; RepoURL is the human GitHub repo.
+func (s *Skills) RawURL(name string) string { return s.base + "/" + name + "/SKILL.md" }
+func (s *Skills) RepoURL() string {
+	b := strings.Replace(s.base, "https://raw.githubusercontent.com/", "https://github.com/", 1)
+	parts := strings.Split(b, "/")
+	if len(parts) >= 5 { // https:, "", github.com, owner, repo, [branch...]
+		return strings.Join(parts[:5], "/")
+	}
+	return b
 }
 
 const voiceWrap = `# VOICE FILTER
@@ -212,6 +253,12 @@ You remain THE ORACLE, answering only from CoCA doctrine above. Speak through th
 `
 
 const genericGlue = `Apply the following skill to how you think and respond. Give plain, useful answers suitable for a terminal session; keep them tight. Do not mention that you are following a skill, and do not adopt any institutional or "Oracle" persona — you are a general assistant wearing this one discipline.
+
+---
+
+`
+
+const genericVoiceWrap = `Respond in the voice, method, and characteristic concerns of the thinker described below. Let it shape how you reason, what you notice, and how you phrase things. Do not impersonate them as a historical figure, narrate "as <thinker>", or claim to be them — channel the method, not the persona.
 
 ---
 

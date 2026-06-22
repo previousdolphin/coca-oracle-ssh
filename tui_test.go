@@ -81,57 +81,75 @@ func TestMenuFlow(t *testing.T) {
 		t.Fatalf("banner missing connect sequence:\n%s", m.View())
 	}
 
-	// Skip the banner -> mode picker.
+	// Skip the banner -> engine picker.
 	m = step(m, bannerDoneMsg{})
-	modes := m.View()
-	if !strings.Contains(modes, "choose a channel") || !strings.Contains(modes, "ORACLE · doctrine") {
-		t.Fatalf("mode screen wrong:\n%s", modes)
+	eng := m.View()
+	if !strings.Contains(eng, "choose a channel") || !strings.Contains(eng, "THE ORACLE") {
+		t.Fatalf("engine screen wrong:\n%s", eng)
 	}
 
-	// Doctrine: enter on the first mode goes straight to chat, no skill.
-	md := step(m, key("enter"))
-	if md.screen != screenChat || md.mode != ModeDoctrine {
-		t.Fatalf("doctrine should jump to chat; screen=%d mode=%q", md.screen, md.mode)
+	// Oracle -> voice pick -> raw -> chat (no voice).
+	o := step(m, key("enter"))
+	if o.screen != screenPick || o.picking != "voice" {
+		t.Fatalf("oracle should open voice pick; screen=%d picking=%q", o.screen, o.picking)
+	}
+	if !strings.Contains(o.View(), "CHOOSE A VOICE") {
+		t.Fatalf("voice pick header missing:\n%s", o.View())
+	}
+	o = step(o, key("enter")) // raw (index 0)
+	if o.screen != screenChat || o.engine != EngineOracle || o.voice != "" {
+		t.Fatalf("oracle raw should chat; screen=%d engine=%q voice=%q", o.screen, o.engine, o.voice)
 	}
 
-	// Generic: third mode -> category menu -> skills.
-	g := step(step(step(m, key("down")), key("down")), key("enter"))
-	if g.screen != screenCats || g.mode != ModeGeneric {
-		t.Fatalf("generic should open categories; screen=%d mode=%q", g.screen, g.mode)
+	// Open -> skill pick -> inversion -> voice pick -> no voice -> chat.
+	g := step(step(m, key("down")), key("enter"))
+	if g.screen != screenPick || g.picking != "skill" || g.engine != EngineOpen {
+		t.Fatalf("open should open skill pick; screen=%d picking=%q", g.screen, g.picking)
 	}
-	cats := g.View()
-	if !strings.Contains(cats, "select a category") || !strings.Contains(cats, "THINKING FRAMEWORKS") {
-		t.Fatalf("category screen wrong:\n%s", cats)
+	if !strings.Contains(g.View(), "CHOOSE A SKILL") {
+		t.Fatalf("skill pick header missing:\n%s", g.View())
 	}
-	g = step(g, key("enter")) // open first category
-	if g.screen != screenSkills {
-		t.Fatalf("expected skills screen, got %d", g.screen)
+	g = step(g, key("down"))  // index 1 = inversion
+	g = step(g, key("enter")) // choose skill -> voice pick
+	if g.picking != "voice" || g.skill != "inversion" {
+		t.Fatalf("after skill: picking=%q skill=%q", g.picking, g.skill)
 	}
-	if sv := g.View(); !strings.Contains(sv, "inversion") || !strings.Contains(sv, "load module") {
-		t.Fatalf("skills screen wrong:\n%s", sv)
-	}
-	if g = step(g, key("esc")); g.screen != screenCats {
-		t.Fatalf("generic esc should return to categories, got %d", g.screen)
+	g = step(g, key("enter")) // no voice -> connect
+	if g.screen != screenChat || g.skill != "inversion" || g.voice != "" {
+		t.Fatalf("open+skill should chat; screen=%d skill=%q voice=%q", g.screen, g.skill, g.voice)
 	}
 
-	// Voice: second mode jumps straight to the After— skills, esc returns to modes.
-	v := step(step(m, key("down")), key("enter"))
-	if v.screen != screenSkills || v.mode != ModeVoice || v.activeCat != "After —" {
-		t.Fatalf("voice should open After— skills; screen=%d mode=%q cat=%q", v.screen, v.mode, v.activeCat)
+	// Open with neither skill nor voice -> flash, bounce back to skill pick.
+	bad := step(step(m, key("down")), key("enter")) // open -> skill pick
+	bad = step(bad, key("enter"))                   // no skill -> voice pick
+	bad = step(bad, key("enter"))                   // no voice -> invalid
+	if bad.screen != screenPick || bad.picking != "skill" || !strings.Contains(bad.flash, "pick a skill") {
+		t.Fatalf("invalid open not handled; screen=%d picking=%q flash=%q", bad.screen, bad.picking, bad.flash)
 	}
-	if v = step(v, key("esc")); v.screen != screenModes {
-		t.Fatalf("voice esc should return to modes, got %d", v.screen)
+
+	// Install overlay: 'd' on a real skill shows commands; any key dismisses.
+	ins := step(step(step(step(m, key("down")), key("enter")), key("down")), key("d"))
+	if !ins.installing || ins.installName != "inversion" {
+		t.Fatalf("install overlay not opened; installing=%v name=%q", ins.installing, ins.installName)
+	}
+	if !strings.Contains(ins.View(), "git clone") {
+		t.Fatalf("install view missing commands:\n%s", ins.View())
+	}
+	if ins = step(ins, key("x")); ins.installing {
+		t.Fatal("install overlay should dismiss on key")
 	}
 }
 
-func TestSystemForDoctrine(t *testing.T) {
+func TestSystemForCompositions(t *testing.T) {
 	s := testStore()
-	sys, err := s.SystemFor(nil, ModeDoctrine, "")
-	if err != nil {
-		t.Fatalf("doctrine system: %v", err)
+	// oracle raw = doctrine only
+	raw, err := s.SystemFor(nil, EngineOracle, "", "")
+	if err != nil || !strings.Contains(raw, "THE ORACLE of the Church of Conceptual Art") {
+		t.Fatalf("oracle raw wrong: %v\n%s", err, raw)
 	}
-	if !strings.Contains(sys, "THE ORACLE of the Church of Conceptual Art") {
-		t.Fatal("doctrine prompt missing Oracle identity")
+	// open with neither -> error
+	if _, err := s.SystemFor(nil, EngineOpen, "", ""); err == nil {
+		t.Fatal("open with no skill/voice should error")
 	}
 }
 
@@ -140,10 +158,10 @@ func TestChatRenderAndGuards(t *testing.T) {
 	m := newModel(r, testStore(), NewOracle("", ""), NewLimiter(99, time.Minute, 999), "1.2.3.4")
 	m = step(m, tea.WindowSizeMsg{Width: 100, Height: 30})
 
-	// Simulate a loaded generic module + a finished exchange, then check rendering.
+	// Simulate a loaded open-channel skill + a finished exchange.
 	m.screen = screenChat
-	m.mode = ModeGeneric
-	m.skillName = "after-nietzsche"
+	m.engine = EngineOpen
+	m.skill = "inversion"
 	m.system = "SYS"
 	m.msgs = []Msg{
 		{Role: "user", Content: "what is value?"},
@@ -151,13 +169,13 @@ func TestChatRenderAndGuards(t *testing.T) {
 	}
 	m.renderTranscript()
 	v := m.View()
-	for _, want := range []string{"open channel", "after-nietzsche", "what is value?"} {
+	for _, want := range []string{"open ·", "inversion", "what is value?"} {
 		if !strings.Contains(v, want) {
 			t.Fatalf("chat view missing %q:\n%s", want, v)
 		}
 	}
 
-	// Refusal/error replies land as assistant turns, not crashes.
+	// Refusal lands as an assistant turn (neutral copy for open channel).
 	m2 := step(m, replyMsg{err: ErrRefused})
 	if last := m2.msgs[len(m2.msgs)-1]; last.Content != "[ request refused ]" {
 		t.Fatalf("refusal not rendered as assistant turn: %+v", last)
