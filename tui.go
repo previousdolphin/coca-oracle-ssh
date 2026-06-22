@@ -22,6 +22,7 @@ const (
 	screenEngine
 	screenPick
 	screenChat
+	screenConsole
 )
 
 const (
@@ -99,10 +100,12 @@ type replyMsg struct {
 
 type model struct {
 	st     styles
+	r      *lipgloss.Renderer
 	store  *Skills
 	oracle *Oracle
 	rl     *Limiter
 	ip     string
+	con    *consoleState // CoCA-DOS, when active
 
 	screen screen
 	width  int
@@ -172,6 +175,7 @@ func newModel(r *lipgloss.Renderer, store *Skills, oracle *Oracle, rl *Limiter, 
 
 	m := model{
 		st:     st,
+		r:      r,
 		store:  store,
 		oracle: oracle,
 		rl:     rl,
@@ -285,6 +289,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updatePick(msg)
 	case screenChat:
 		return m.updateChat(msg)
+	case screenConsole:
+		if m.con != nil && m.con.update(msg) {
+			// console exited — back to the chat
+			m.con = nil
+			m.screen = screenChat
+			return m, m.ta.Focus()
+		}
+		return m, nil
 	}
 	return m, nil
 }
@@ -398,6 +410,14 @@ func (m model) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if text == "" {
 				return m, nil
 			}
+			// Easter egg: /console drops into CoCA-DOS.
+			if strings.EqualFold(text, "/console") {
+				m.ta.Reset()
+				m.ta.Blur()
+				m.con = newConsole(m.r, m.width, m.height)
+				m.screen = screenConsole
+				return m, nil
+			}
 			if ok, reason := m.rl.Allow(m.ip); !ok {
 				m.flash = reason
 				return m, nil
@@ -496,6 +516,9 @@ func (m *model) resize(w, h int) {
 	m.vp.Height = vpH
 	m.ta.SetWidth(vpW)
 	m.renderTranscript()
+	if m.con != nil {
+		m.con.resize(w, h)
+	}
 }
 
 func (m *model) trimHistory() {
@@ -612,6 +635,10 @@ func (m model) View() string {
 		return m.pickView()
 	case screenChat:
 		return m.chatView()
+	case screenConsole:
+		if m.con != nil {
+			return m.con.view()
+		}
 	}
 	return ""
 }
@@ -743,7 +770,7 @@ func (m model) chatView() string {
 	if m.flash != "" {
 		b.WriteString("  " + m.st.err.Render(m.flash) + "\n")
 	}
-	b.WriteString(m.hint("⏎ send   esc back   ctrl+c disconnect"))
+	b.WriteString(m.hint("⏎ send   esc back   /console   ctrl+c disconnect"))
 	return b.String()
 }
 
